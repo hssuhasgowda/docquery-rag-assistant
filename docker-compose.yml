@@ -1,0 +1,115 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - QDRANT_HOST=qdrant
+      # QDRANT_API_KEY comes from env_file (.env) — do not redefine it here.
+      # A `${QDRANT_API_KEY:-}` override would clobber the .env value with an
+      # empty string whenever the interpolation context lacks the var, which
+      # silently desyncs the app from the (authenticated) Qdrant server.
+      # Force HuggingFace's classic CDN download path. The Xet transfer
+      # protocol is blocked/throttled by some corporate TLS-inspection proxies.
+      - HF_HUB_DISABLE_XET=1
+    volumes:
+      - ./docs:/app/docs
+      # Real (confidential) corpus — gitignored on the host. Read-only mount so
+      # the container can ingest it when INGEST_ROOT=data.
+      - ./data:/app/data:ro
+      # Self-contained model cache so `docker compose up` works on any host
+      # regardless of UID. First run downloads the models (~90MB for the
+      # defaults; ~1.1GB for the multilingual pair in .env.example); persists.
+      - hf_cache:/home/appuser/.cache/huggingface
+      # Google Drive service account key, mounted as a file rather than passed
+      # through the environment. Uncomment alongside
+      # GDRIVE_SERVICE_ACCOUNT_FILE=/app/secrets/gdrive-sa.json in .env.
+      # - ./secrets/gdrive-sa.json:/app/secrets/gdrive-sa.json:ro
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Ingestion as an ephemeral container — the local mirror of running it as an
+  # on-demand task (ECS RunTask) in a cloud deploy. Under a profile so
+  # `docker compose up` never starts it; run it as
+  #
+  #   docker compose run --rm ingest docs/sample
+  #
+  # and it starts qdrant if needed, indexes, and exits. Keeping it out of the
+  # `app` process means a deploy/restart of the API cannot kill an ingestion
+  # halfway through the delete-then-insert window, and OCR/embedding CPU never
+  # competes with query traffic.
+  ingest:
+    build: .
+    profiles: ["ingest"]
+    entrypoint: ["python", "-m", "docquery.ingest.pipeline"]
+    env_file:
+      - .env
+    environment:
+      - QDRANT_HOST=qdrant
+      # Same rationale as in `app`: QDRANT_API_KEY comes from .env untouched,
+      # and Xet is disabled for proxies that block it.
+      - HF_HUB_DISABLE_XET=1
+    volumes:
+      - ./docs:/app/docs
+      - ./data:/app/data:ro
+      # Shared with `app`, so the embedding models download once for both.
+      - hf_cache:/home/appuser/.cache/huggingface
+      # - ./secrets/gdrive-sa.json:/app/secrets/gdrive-sa.json:ro
+    # Only qdrant: ingestion never touches conversation history.
+    depends_on:
+      qdrant:
+        condition: service_healthy
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    # No 'ports' — Qdrant stays on the internal docker network only. Expose
+    # the ports for cross-container traffic without publishing to the host.
+    expose:
+      - "6333"
+      - "6334"
+    environment:
+      # Fail loudly if QDRANT_API_KEY is unset/empty rather than starting an
+      # unauthenticated server that the app expects to be authenticated.
+      - QDRANT__SERVICE__API_KEY=${QDRANT_API_KEY:?QDRANT_API_KEY must be set in .env}
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/6333'"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # Conversation history. Only used when HISTORY_ENABLED=true; the service runs
+  # either way so enabling the feature needs no compose change. Point
+  # HISTORY_DSN at an existing corporate instance instead to skip it.
+  mysql:
+    image: mysql:8
+    # No 'ports' — like Qdrant, it stays on the internal network. Nothing
+    # outside the compose project has any business reaching the history.
+    expose:
+      - "3306"
+    environment:
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD must be set in .env}
+      - MYSQL_DATABASE=${MYSQL_DATABASE:-docquery}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      # The app applies the schema on first use, so it must not start against a
+      # server that is still initialising.
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p$$MYSQL_ROOT_PASSWORD"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  qdrant_data:
+  hf_cache:
+  mysql_data:

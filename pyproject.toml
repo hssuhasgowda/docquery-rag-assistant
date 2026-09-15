@@ -1,0 +1,107 @@
+[project]
+name = "docquery"
+version = "0.1.0"
+description = "Production RAG system for querying technical documentation"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi[standard]",
+    "pydantic-settings",
+    "sentence-transformers",
+    "qdrant-client",
+    "openai",
+    "langchain-text-splitters",
+    "pypdf",
+    # Highlight geometry for emphasis extraction (ingest/emphasis.py): fill
+    # rects and /Highlight annotations with their colors and bboxes, which
+    # pypdf does not expose. Imported lazily; only touched when
+    # EMPHASIS_EXTRACTION_ENABLED is on.
+    "pdfplumber",
+    # Red-box detection inside screenshots (ingest/image_emphasis.py). All
+    # three arrive with docling; declared because a transitive dependency is
+    # not a guarantee. opencv-python, never -headless — docling already drags
+    # opencv-python, and both wheels claim the cv2 namespace.
+    "opencv-python",
+    "pillow",
+    "rapidocr",
+    # OOXML core properties are parsed from documents the operator does not
+    # control (ingest/modified.py). Arrives with docling; declared because a
+    # transitive dependency is not a guarantee.
+    "defusedxml",
+    "torch",
+    # Pulled in transitively by docling. Declared here so the CPU-index routing
+    # in [tool.uv.sources] applies to it, and pinned to the release that matches
+    # the locked torch — a mismatched pair fails at import with
+    # "operator torchvision::nms does not exist".
+    "torchvision==0.26.0",
+    "docling==2.120.1",
+    # Entra ID token validation. The [crypto] extra brings cryptography, needed
+    # for RS256 verification and to mint test keypairs without a dev dependency.
+    "pyjwt[crypto]",
+    # Remote ingest sources. Both APIs are reached over plain REST with httpx —
+    # msgraph-sdk and google-api-python-client each pull a large stack to wrap
+    # the handful of endpoints used here. msal and google-auth handle only the
+    # credential exchange, which is the part worth not writing by hand.
+    "httpx",
+    "msal",
+    "google-auth",
+    # Conversation history. Pure-Python driver on purpose: mysqlclient needs a
+    # C toolchain and libmysqlclient headers, which the slim runtime image does
+    # not carry. The SQL here is a handful of statements, so the speed
+    # difference is not worth a build stage.
+    "pymysql",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "httpx",
+    "ruff",
+]
+eval = [
+    "ragas",
+    "langchain-openai",
+]
+chunking = [
+    "langchain-experimental",
+]
+security = [
+    "deepeval",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/docquery"]
+
+[tool.fastapi]
+entrypoint = "docquery.api.app:app"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = [
+    "docling: end-to-end Docling conversion; needs the models, minutes to run",
+    "mysql: MySQL-backed stores against a real server; opt-in",
+    "multilingual: e5 retrieval end-to-end; downloads ~1.1GB of weights; opt-in",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+# docling pulls torchvision in transitively. It must come from the same index
+# as torch: the PyPI build is compiled against a different torch and fails at
+# import with "operator torchvision::nms does not exist".
+torchvision = { index = "pytorch-cpu" }
+
+[tool.ruff]
+src = ["src"]
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "FAST"]
