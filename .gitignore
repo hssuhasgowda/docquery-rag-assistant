@@ -19,3 +19,5 @@ docker-data/
 data/
 docs/Summary (2).pdf
 docs/Venu Gopal PV- EC Service Agreement 2025.docx.pdf
+# Locally generated OpenAPI specification
+openapi-local.json
